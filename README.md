@@ -161,7 +161,7 @@ The ClientApp will:
 | File | What to learn |
 |------|--------------|
 | `ClientApp/Program.cs` | How to use MSAL to acquire tokens interactively and call a protected API |
-| `MiddleTierApi/Program.cs` | **The OBO flow** — how `EnableTokenAcquisitionToCallDownstreamApi()` + `AddDownstreamApi()` wires up token exchange |
+| `MiddleTierApi/Program.cs` | **The OBO flow** — how `ConfidentialClientApplication` + `AcquireTokenOnBehalfOf` performs the token exchange, and how certificate-based auth works |
 | `DownstreamApi/Program.cs` | How to protect a minimal API with Azure AD bearer tokens |
 | `MiddleTierApi/appsettings.json` | How to configure the downstream API scopes for OBO |
 
@@ -171,7 +171,9 @@ The ClientApp will:
 
 | Symptom | Fix |
 |---------|-----|
+| `IDX10214: Audience validation failed` | The token's `aud` claim format doesn't match the configured `Audience`. This is a **v1 vs v2 token** issue. By default, new app registrations issue v1 tokens where `aud` = `api://<client-id>`. To use v2 tokens (where `aud` = the raw client ID GUID), go to Azure Portal → App registrations → **Manifest**, and set `"requestedAccessTokenVersion": 2` under the `api` section. Do this for both **MiddleTierApi** and **DownstreamApi**. Then set `Audience` in `appsettings.json` to the raw client ID (no `api://` prefix). |
 | `AADSTS65001: The user or administrator has not consented` | Go to API permissions → Grant admin consent |
-| `AADSTS700027: Client assertion contains an invalid signature` | Wrong client secret — regenerate in Azure Portal |
+| `AADSTS700027: Client assertion contains an invalid signature` | The certificate uploaded to the app registration doesn't match the `.pfx` used by the code. Re-upload the `.cer` file or regenerate the certificate. |
+| `AADSTS7000215: Invalid client secret` | The client secret or certificate is not recognized. Check Certificates & secrets in Azure Portal. |
 | `401 Unauthorized` on DownstreamApi | Check the `Audience` in appsettings matches the exposed API URI |
 | `AADSTS50011: The redirect URI does not match` | Ensure ClientApp registration has `http://localhost` as redirect URI |
