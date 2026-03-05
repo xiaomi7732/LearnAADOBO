@@ -6,6 +6,7 @@ using Microsoft.Identity.Web;
 var builder = WebApplication.CreateBuilder(args);
 
 var azureAdConfig = builder.Configuration.GetSection("AzureAd");
+var clientId = azureAdConfig["ClientId"]!;
 
 // ── Validate incoming bearer tokens ──
 // This ensures callers present a valid Azure AD token scoped to this API.
@@ -21,7 +22,6 @@ builder.Services
 // Both the app identity (client_id + client_secret) and the user identity (the incoming
 // token) are required before Azure AD will issue an OBO token.
 var tenantId = azureAdConfig["TenantId"]!;
-var clientId = azureAdConfig["ClientId"]!;
 var clientSecret = azureAdConfig["ClientSecret"]!;
 var authority = $"{azureAdConfig["Instance"]}{tenantId}/v2.0";
 
@@ -85,12 +85,99 @@ app.MapGet("/api/weather-aggregator", async (
     // If everything checks out, Azure AD returns Token B — a new access token scoped to
     // DownstreamApi, still carrying the original user's identity (name, oid, etc.).
     // MSAL caches Token B internally so repeated calls reuse it until expiry.
-    var result = await confidentialClient
-        .AcquireTokenOnBehalfOf(downstreamScopes, userAssertion)
-        .ExecuteAsync();
+    string accessToken;
+    try
+    {
+        var result = await confidentialClient
+            .AcquireTokenOnBehalfOf(downstreamScopes, userAssertion)
+            .ExecuteAsync();
 
-    // result.AccessToken is Token B
-    var accessToken = result.AccessToken;
+        accessToken = result.AccessToken;
+    }
+    catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS7000215"))
+    {
+        // Invalid client secret — the value in appsettings.json doesn't match Azure AD.
+        return Results.Json(new
+        {
+            Error = "APP_CREDENTIAL_INVALID",
+            Detail = "The MiddleTierApi's client secret is wrong. "
+                + "Go to Azure Portal → App registrations → MiddleTierApi → "
+                + "Certificates & secrets, generate a new secret, and update appsettings.json.",
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 502);
+    }
+    catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS7000222"))
+    {
+        // Expired client secret.
+        return Results.Json(new
+        {
+            Error = "APP_CREDENTIAL_EXPIRED",
+            Detail = "The MiddleTierApi's client secret has expired. "
+                + "Go to Azure Portal → App registrations → MiddleTierApi → "
+                + "Certificates & secrets, generate a new secret, and update appsettings.json.",
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 502);
+    }
+    catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS700027"))
+    {
+        // Client assertion signature failure — usually a wrong or rotated secret.
+        return Results.Json(new
+        {
+            Error = "APP_CREDENTIAL_SIGNATURE_MISMATCH",
+            Detail = "The client secret (or certificate) doesn't match what Azure AD expects. "
+                + "Regenerate the secret in Azure Portal and update appsettings.json.",
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 502);
+    }
+    catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS50013"))
+    {
+        // Assertion (the user's token) failed validation — expired, bad signature, wrong issuer.
+        return Results.Json(new
+        {
+            Error = "USER_TOKEN_INVALID",
+            Detail = "The incoming user token (Token A) failed validation at Azure AD. "
+                + "This usually means the token is expired or was issued by an untrusted authority. "
+                + "Have the client sign in again to get a fresh token.",
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 401);
+    }
+    catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS65001"))
+    {
+        // Admin consent not granted for the requested scopes.
+        return Results.Json(new
+        {
+            Error = "CONSENT_REQUIRED",
+            Detail = "Admin consent has not been granted for MiddleTierApi to call DownstreamApi "
+                + "on behalf of this user. Go to Azure Portal → App registrations → MiddleTierApi → "
+                + "API permissions → Grant admin consent.",
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 403);
+    }
+    catch (MsalServiceException ex) when (
+        ex.ErrorCode.Contains("AADSTS500011") || ex.ErrorCode.Contains("AADSTS70011"))
+    {
+        // Resource not found or invalid scope — downstream API not registered or scopes misconfigured.
+        return Results.Json(new
+        {
+            Error = "SCOPE_OR_RESOURCE_INVALID",
+            Detail = "The requested scope or resource doesn't exist in Azure AD. "
+                + "Check that DownstreamApi:Scopes in appsettings.json matches the "
+                + "Expose an API → Application ID URI of the DownstreamApi app registration.",
+            RequestedScopes = downstreamScopes,
+            AzureAdCode = ex.ErrorCode
+        }, statusCode: 502);
+    }
+    catch (MsalServiceException ex)
+    {
+        // Catch-all for other Azure AD errors.
+        return Results.Json(new
+        {
+            Error = "OBO_TOKEN_EXCHANGE_FAILED",
+            Detail = "Azure AD rejected the OBO token exchange. See AzureAdCode and Message for details.",
+            AzureAdCode = ex.ErrorCode,
+            Message = ex.Message
+        }, statusCode: 502);
+    }
 
     // ── Step 3: Call the downstream API with Token B ──
     var client = httpClientFactory.CreateClient("DownstreamApi");
