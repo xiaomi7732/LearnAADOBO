@@ -1,7 +1,8 @@
-using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Identity.Client;
 using Microsoft.Identity.Web;
+using System.Net.Http.Headers;
+using System.Security.Cryptography.X509Certificates;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,18 +18,31 @@ builder.Services
 
 // ── Build the MSAL ConfidentialClientApplication ──
 // This object represents the MiddleTierApi's own identity.
-// "Confidential client" means the app has a credential (client secret) it can use to
-// prove to Azure AD that it really is the MiddleTierApi — not some impersonator.
-// Both the app identity (client_id + client_secret) and the user identity (the incoming
-// token) are required before Azure AD will issue an OBO token.
+// "Confidential client" means the app has a credential it can use to prove its identity
+// to Azure AD. Instead of a client secret, we use a certificate:
+//   - The PRIVATE key (in the .pfx file) is used to sign a JWT client assertion
+//   - Azure AD verifies the signature using the PUBLIC key (.cer) uploaded to the app registration
+// This is more secure than a client secret because the private key never leaves this machine.
+//
+// With SNI (Subject Name and Issuer) authentication, you don't upload the certificate
+// directly to the app registration (which would trigger credential lifetime policies).
+// Instead, you configure the app registration to trust certificates by their subject name
+// and issuer. MSAL sends the full certificate chain (x5c) in the JWT client assertion,
+// and Azure AD validates it against the configured trust — no credential upload needed.
 var tenantId = azureAdConfig["TenantId"]!;
-var clientSecret = azureAdConfig["ClientSecret"]!;
+var certPath = azureAdConfig["CertificatePath"]!;
+var certPassword = azureAdConfig["CertificatePassword"]!;
 var authority = $"{azureAdConfig["Instance"]}{tenantId}/v2.0";
 
+// Load the certificate from a .pfx file (contains both public and private key).
+var certificate = X509CertificateLoader.LoadPkcs12FromFile(certPath, certPassword);
+
 IConfidentialClientApplication confidentialClient = ConfidentialClientApplicationBuilder
-    .Create(clientId)                      // MiddleTierApi's application (client) ID
-    .WithClientSecret(clientSecret)        // MiddleTierApi's secret — proves the app's identity
-    .WithAuthority(new Uri(authority))     // Azure AD tenant + version (e.g. .../v2.0)
+    .Create(clientId)                              // MiddleTierApi's application (client) ID
+    .WithCertificate(certificate, sendX5C: true)   // sendX5C: true → sends the certificate chain
+                                                   // in the x5c header of the JWT client assertion,
+                                                   // enabling SNI-based authentication
+    .WithAuthority(new Uri(authority))             // Azure AD tenant + version (e.g. .../v2.0)
     .Build();
 
 builder.Services.AddSingleton(confidentialClient);
@@ -69,16 +83,21 @@ app.MapGet("/api/weather-aggregator", async (
     //   POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token
     //   Content-Type: application/x-www-form-urlencoded
     //
-    //   grant_type          = urn:ietf:params:oauth:grant-type:jwt-bearer
-    //   client_id           = <MiddleTierApi client ID>        ← app identity
-    //   client_secret       = <MiddleTierApi secret>           ← app credential
-    //   assertion           = <Token A from caller>            ← user identity
-    //   scope               = api://<DownstreamApi>/.default   ← what we want access to
-    //   requested_token_use = on_behalf_of                     ← the OBO grant type
+    //   grant_type            = urn:ietf:params:oauth:grant-type:jwt-bearer
+    //   client_id             = <MiddleTierApi client ID>        ← app identity
+    //   client_assertion_type = urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+    //   client_assertion      = <JWT signed with the certificate's private key>  ← app credential
+    //   assertion             = <Token A from caller>            ← user identity
+    //   scope                 = api://<DownstreamApi>/.default   ← what we want access to
+    //   requested_token_use   = on_behalf_of                     ← the OBO grant type
+    //
+    // With a certificate, MSAL builds a short-lived JWT (the "client assertion"), signs it
+    // with the private key from the .pfx, and sends that instead of a plain client_secret.
+    // Azure AD verifies the signature using the public key (.cer) uploaded to the app registration.
     //
     // Azure AD validates BOTH identities before issuing Token B:
-    //   1. App identity  (client_id + client_secret) — is this a registered, legitimate app?
-    //   2. User identity (assertion / Token A)       — is this a valid user token?
+    //   1. App identity  (client_id + client_assertion) — is this a registered, legitimate app?
+    //   2. User identity (assertion / Token A)          — is this a valid user token?
     //      It also checks: is MiddleTierApi authorized to request tokens for DownstreamApi
     //      on behalf of this user? (configured via API permissions + admin consent)
     //
@@ -96,13 +115,13 @@ app.MapGet("/api/weather-aggregator", async (
     }
     catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS7000215"))
     {
-        // Invalid client secret — the value in appsettings.json doesn't match Azure AD.
+        // Invalid credential — the certificate's public key doesn't match what's uploaded in Azure AD.
         return Results.Json(new
         {
             Error = "APP_CREDENTIAL_INVALID",
-            Detail = "The MiddleTierApi's client secret is wrong. "
+            Detail = "The MiddleTierApi's certificate is not recognized by Azure AD. "
                 + "Go to Azure Portal → App registrations → MiddleTierApi → "
-                + "Certificates & secrets, generate a new secret, and update appsettings.json.",
+                + "Certificates & secrets → Certificates, and upload the .cer file.",
             AzureAdCode = ex.ErrorCode
         }, statusCode: 502);
     }
@@ -112,20 +131,21 @@ app.MapGet("/api/weather-aggregator", async (
         return Results.Json(new
         {
             Error = "APP_CREDENTIAL_EXPIRED",
-            Detail = "The MiddleTierApi's client secret has expired. "
-                + "Go to Azure Portal → App registrations → MiddleTierApi → "
-                + "Certificates & secrets, generate a new secret, and update appsettings.json.",
+            Detail = "The MiddleTierApi's certificate has expired. "
+                + "Generate a new self-signed certificate, update the .pfx file, "
+                + "and upload the new .cer to Azure Portal → App registrations → MiddleTierApi → "
+                + "Certificates & secrets.",
             AzureAdCode = ex.ErrorCode
         }, statusCode: 502);
     }
     catch (MsalServiceException ex) when (ex.ErrorCode.Contains("AADSTS700027"))
     {
-        // Client assertion signature failure — usually a wrong or rotated secret.
+        // Client assertion signature failure — certificate mismatch or corruption.
         return Results.Json(new
         {
             Error = "APP_CREDENTIAL_SIGNATURE_MISMATCH",
-            Detail = "The client secret (or certificate) doesn't match what Azure AD expects. "
-                + "Regenerate the secret in Azure Portal and update appsettings.json.",
+            Detail = "The certificate used to sign the client assertion doesn't match "
+                + "the public key uploaded to Azure AD. Re-upload the .cer file or regenerate the certificate.",
             AzureAdCode = ex.ErrorCode
         }, statusCode: 502);
     }
