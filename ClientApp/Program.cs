@@ -6,9 +6,9 @@ using Microsoft.Identity.Client;
 // ═══════════════════════════════════════════════════════════════
 
 // ── Configuration (replace with your Azure AD app registration values) ──
-const string tenantId = "2c952286-1d8a-461a-bde8-3b0447c7691d";
-const string clientAppClientId = "9b3e060f-b191-4e1c-b86b-bb160d6cd95b";
-const string middleTierApiScope = "api://eb8b9d91-6966-4a5c-84dc-a4e23ddaac6a/Read.Data";
+const string tenantId = "<YOUR_TENANT_ID>";
+const string clientAppClientId = "<YOUR_CLIENT_APP_CLIENT_ID>";
+const string middleTierApiScope = "api://<YOUR_MIDDLETIER_API_CLIENT_ID>/access_as_user";
 const string middleTierApiBaseUrl = "https://localhost:7213";
 
 // ── Build the MSAL public client application ──
