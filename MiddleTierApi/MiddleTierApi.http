@@ -1,0 +1,6 @@
+@MiddleTierApi_HostAddress = http://localhost:5038
+
+GET {{MiddleTierApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

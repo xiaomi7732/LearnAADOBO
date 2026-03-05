@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="ClientApp/ClientApp.csproj" />
+  <Project Path="DownstreamApi/DownstreamApi.csproj" />
+  <Project Path="MiddleTierApi/MiddleTierApi.csproj" />
+</Solution>
