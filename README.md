@@ -132,7 +132,29 @@ const string middleTierApiScope = "api://<YOUR_MIDDLETIER_API_CLIENT_ID>/access_
 
 ---
 
-## Step 3: Run
+## Step 3: Generate the MiddleTierApi Certificate
+
+The MiddleTierApi uses a certificate (instead of a client secret) to prove its identity to Azure AD during the OBO flow. Run the included script to generate a dev certificate:
+
+```powershell
+.\New-DevCertificate.ps1
+```
+
+This creates two files in `MiddleTierApi/`:
+- **`MiddleTierApi.pfx`** — private + public key, loaded by the code at runtime
+- **`MiddleTierApi.cer`** — public key only, **upload this** to Azure Portal → App registrations → MiddleTierApi → Certificates & secrets → Certificates
+
+Optional parameters:
+```powershell
+.\New-DevCertificate.ps1 -DaysValid 7              # shorter lifetime
+.\New-DevCertificate.ps1 -PfxPassword "my-secret"   # custom password (update appsettings.json to match)
+```
+
+> ⚠️ If your org has a credential lifetime policy, you may need to reduce `-DaysValid` to comply.
+
+---
+
+## Step 4: Run
 
 Open **3 terminals** in the solution root:
 
